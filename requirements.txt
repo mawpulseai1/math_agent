@@ -1,0 +1,8 @@
+openai>=1.40
+httpx>=0.27
+PySide6>=6.7
+pymupdf>=1.24
+ddgs>=9.0
+python-dotenv>=1.0
+numpy>=1.26
+sympy>=1.13
