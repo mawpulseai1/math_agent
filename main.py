@@ -20,7 +20,7 @@ def main():
         cfg = Config()
         if start_docker():
             root = Path(__file__).resolve().parent
-            ok = build_image(cfg.lean_image, str(root / "docker" / "Dockerfile.lean"))
+            ok = build_image(cfg.lean_image, str(root / "docker" / "Dockerfile.lean"), stream=True)
             sys.exit(0 if ok else 1)
         sys.exit(1)
     elif args.ingest:

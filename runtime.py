@@ -149,14 +149,22 @@ def start_docker(emit=print, wait_seconds: int = 90) -> bool:
     return False
 
 
-def build_image(image: str, dockerfile: str, emit=print) -> bool:
+def build_image(image: str, dockerfile: str, emit=print, stream: bool = False) -> bool:
     df = Path(dockerfile)
     if not df.exists():
         emit("startup", f"Dockerfile not found: {df}")
         return False
     emit("startup", f"Building Docker image {image} from {df}...")
+    cmd = ["docker", "build", "-t", image, "-f", str(df), str(df.parent.parent)]
+    if stream:
+        p = subprocess.run(cmd)
+        if p.returncode == 0:
+            emit("startup", f"Built {image} successfully.")
+            return True
+        emit("startup", f"Failed to build {image} (exit code {p.returncode}).")
+        return False
     p = subprocess.run(
-        ["docker", "build", "-t", image, "-f", str(df), str(df.parent.parent)],
+        cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -165,7 +173,7 @@ def build_image(image: str, dockerfile: str, emit=print) -> bool:
     if p.returncode == 0:
         emit("startup", f"Built {image} successfully.")
         return True
-    emit("startup", f"Failed to build {image}: {(p.stderr or p.stdout)[-800:]}")
+    emit("startup", f"Failed to build {image}: {(p.stderr or p.stdout)[-1500:]}")
     return False
 
 
