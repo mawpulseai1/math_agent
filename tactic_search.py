@@ -5,7 +5,18 @@ import time
 from dataclasses import dataclass
 
 # Cheap automation tried at every node. Lean failures are fast.
-CLOSERS = ["norm_num", "linarith", "nlinarith", "positivity", "omega", "simp_all", "aesop"]
+CLOSERS = [
+    "norm_num",
+    "ring",
+    "linarith",
+    "nlinarith",
+    "positivity",
+    "omega",
+    "field_simp",
+    "decide",
+    "simp_all",
+    "aesop",
+]
 
 
 @dataclass

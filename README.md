@@ -14,7 +14,7 @@ Desktop & CLI mathematical research agent following the pipeline:
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` to set your LLM endpoint/keys (`LLM_BASE_URL`, `LLM_API_KEY` or comma-separated `LLM_API_KEYS`, `LLM_MODEL`) and optional academic API keys (`S2_API_KEY`, `CORE_API_KEY`, `STACKEXCHANGE_KEY`, `CONTACT_EMAIL`).
+   Edit `.env` to set your LLM endpoint/keys (`LLM_BASE_URL`, `LLM_API_KEY` or comma-separated `LLM_API_KEYS`, `LLM_MODEL`, `REASONING_EFFORT`), optional semantic embeddings (`EMBED_MODEL=gemini-embedding-001` or local Ollama `nomic-embed-text`), optional local GPU prover (`PROVER_BASE_URL=http://localhost:11434/v1` with e.g. `hf.co/mradermacher/Goedel-Prover-V2-8B-GGUF:Q4_K_M`), and optional academic API keys (`S2_API_KEY`, `CORE_API_KEY`, `STACKEXCHANGE_KEY`, `CONTACT_EMAIL`).
 
 3. Build Docker sandbox images (Docker Desktop is started automatically when launching the agent):
    ```bash

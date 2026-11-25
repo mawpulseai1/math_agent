@@ -1,7 +1,10 @@
 import os
+import shutil
 import subprocess
 import time
+import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 _DOCKER_DESKTOP_PATHS = [
     r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
@@ -47,6 +50,54 @@ def _find_docker_desktop() -> str | None:
         if path and os.path.exists(path):
             return path
     return None
+
+
+def _is_local_ollama(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    return parsed.hostname in ("localhost", "127.0.0.1") and parsed.port == 11434
+
+
+def ollama_ready(base_url: str = "http://localhost:11434", timeout: float = 2.0) -> bool:
+    parsed = urlparse(base_url)
+    root = f"{parsed.scheme or 'http'}://{parsed.netloc or 'localhost:11434'}"
+    try:
+        with urllib.request.urlopen(root + "/api/tags", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def start_ollama(base_url: str = "http://localhost:11434", emit=print, wait_seconds: int = 20) -> bool:
+    if ollama_ready(base_url):
+        return True
+    exe = shutil.which("ollama")
+    if not exe:
+        emit("startup", "Local Ollama endpoint configured, but `ollama` binary was not found in PATH.")
+        return False
+    emit("startup", "Ollama is not running. Starting `ollama serve`...")
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        subprocess.Popen(
+            [exe, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+    except Exception as e:
+        emit("startup", f"Failed to start Ollama: {e}")
+        return False
+
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if ollama_ready(base_url):
+            emit("startup", "Ollama server is ready.")
+            return True
+        time.sleep(1)
+    emit("startup", f"Timed out waiting {wait_seconds}s for Ollama server.")
+    return False
 
 
 def start_docker(emit=print, wait_seconds: int = 90) -> bool:
@@ -119,9 +170,17 @@ def build_image(image: str, dockerfile: str, emit=print) -> bool:
 
 
 def ensure_runtime(cfg, emit=print, build_py: bool = True) -> dict[str, bool]:
-    """Ensure required background services (e.g. Docker Desktop) and images are ready."""
+    """Ensure required background services (Docker Desktop, local Ollama) and images are ready."""
     need_docker = cfg.lean_mode == "docker" or cfg.py_mode == "docker"
-    status = {"docker_ok": not need_docker, "py_image": False, "lean_image": False}
+    status = {"docker_ok": not need_docker, "py_image": False, "lean_image": False, "ollama_ok": True}
+
+    for url in dict.fromkeys(
+        u for u in (cfg.base_url, getattr(cfg, "prover_base_url", ""), getattr(cfg, "embed_base_url", ""))
+        if _is_local_ollama(u)
+    ):
+        if not start_ollama(url, emit=emit):
+            status["ollama_ok"] = False
+
     if not need_docker:
         return status
 

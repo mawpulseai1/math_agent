@@ -45,6 +45,52 @@ def assemble(body: str, holes: list[dict], scripts: list[list[str] | None]) -> s
     return "\n".join(lines)
 
 
+def whole_file_repair(cfg, llm, statement: str, informal: str, check, emit, search_names, rounds: int = 4):
+    """Fast compiler-guided whole-proof loop before falling back to REPL hole search."""
+    want = header_of(statement)
+    body = strip_imports(statement)
+    feedback = ""
+    last_code = ""
+    for attempt in range(rounds):
+        txt = llm.chat(
+            SYS,
+            f"""Prove this theorem completely in Lean 4 + Mathlib.
+STATEMENT (keep the theorem header IDENTICAL):
+{_strip_sorry_tail(statement)}
+
+INFORMAL PROOF (use this as your guide):
+{informal[:6000]}
+
+Rules:
+- Start with `import Mathlib`. Keep `theorem main_thm` signature IDENTICAL.
+- No `sorry`, no `admit`, no `native_decide`, no custom axioms.
+- Use clean `have` subgoals and standard Mathlib tactics (`ring`, `nlinarith`, `positivity`, `omega`, `simp`, `field_simp`, `exact`, `apply`, `induction`, `rcases`).
+- Output only one ```lean block.{feedback}""",
+            model=cfg.prover_model,
+            temperature=0.2 + 0.15 * (attempt > 0),
+            reasoning_effort=cfg.reasoning_effort,
+            use_prover=True,
+        )
+        cand = strip_imports(extract_block(txt, ("lean", "lean4")))
+        if header_of(cand) != want:
+            feedback = "\n\nYou changed the theorem header. Copy `theorem main_thm ... := by` EXACTLY."
+            emit("prove", f"whole-file attempt {attempt + 1}/{rounds}: header changed")
+            continue
+        last_code = cand
+        res = check("import Mathlib\n\n" + cand, theorem="main_thm")
+        emit("prove", f"whole-file attempt {attempt + 1}/{rounds}: complete={res.complete}")
+        if res.complete:
+            return cand, res
+        unknown = re.findall(r"unknown (?:identifier|constant) '([^']+)'", res.output)
+        hints = search_names(unknown) if unknown else []
+        feedback = (
+            f"\n\nPrevious attempt:\n{cand}\n\nLean compiler output:\n{res.output[:2500]}\n"
+            + ("Possibly relevant Mathlib names:\n" + "\n".join(hints) + "\n" if hints else "")
+            + "Fix all errors and eliminate any sorry."
+        )
+    return last_code or body, None
+
+
 def make_skeleton(cfg, llm, statement: str, informal: str, check, emit, search_names):
     want = header_of(statement)
     feedback = ""
@@ -69,6 +115,8 @@ Rules:
 - Output only one ```lean block.{feedback}""",
             model=cfg.prover_model,
             temperature=0.3,
+            reasoning_effort=cfg.reasoning_effort,
+            use_prover=True,
         )
         body = strip_imports(extract_block(txt, ("lean", "lean4")))
         if header_of(body) != want:
@@ -149,6 +197,8 @@ A one-line `have h : P := by nlinarith [...]` is allowed.
 Reply JSON: {{"tactics": ["...", "..."]}}""",
                 model=self.cfg.prover_model,
                 temperature=0.7,
+                reasoning_effort=self.cfg.reasoning_effort,
+                use_prover=True,
             )
         except Exception:
             return []

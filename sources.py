@@ -443,15 +443,49 @@ def fulltext(doc: Doc, max_pages: int = 30) -> str:
         return "\n".join(p.get_text() for p in list(pdf)[:max_pages])
 
 
-def best_chunks(text: str, keywords: list[str], k: int = 4, size: int = 5000) -> str:
+def _split_chunks(text: str, size: int = 4500, overlap: int = 400) -> list[str]:
+    if len(text) <= size:
+        return [text]
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(len(text), start + size)
+        if end < len(text):
+            cut = text.rfind("\n\n", start + size // 2, end)
+            if cut == -1:
+                cut = text.rfind("\n", start + size // 2, end)
+            if cut != -1:
+                end = cut
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(text):
+            break
+        start = max(start + 1, end - overlap)
+    return chunks
+
+
+def best_chunks(text: str, keywords: list[str], k: int = 5, size: int = 4500) -> str:
     if not text:
         return ""
-    chunks = [text[i:i + size] for i in range(0, len(text), size)]
+    import math
+    chunks = _split_chunks(text, size=size)
+    if len(chunks) <= k:
+        return "\n...\n".join(chunks)
+
     kws = [w.lower() for w in keywords if w]
-    if not kws:
-        return "\n...\n".join(chunks[:k])
-    scored = sorted(
-        range(len(chunks)),
-        key=lambda i: -sum(chunks[i].lower().count(w) for w in kws),
-    )[:k]
-    return "\n...\n".join(chunks[i] for i in sorted(scored))
+    n = len(chunks)
+    lows = [c.lower() for c in chunks]
+    # IDF weight per keyword so rare domain terms outweigh generic words
+    df = {w: sum(1 for c in lows if w in c) for w in kws}
+    idf = {w: math.log((n + 1) / (df[w] + 1)) + 1.0 for w in kws}
+
+    def score(idx: int) -> float:
+        c = lows[idx]
+        s = sum(idf[w] * math.log1p(c.count(w)) for w in kws)
+        s += 0.8 * sum(c.count(marker) for marker in ("theorem", "lemma", "proposition", "corollary", "proof"))
+        if idx == 0:
+            s += 0.5  # bias slightly toward abstract/intro/notation
+        return s
+
+    top = sorted(range(n), key=score, reverse=True)[:k]
+    return "\n...\n".join(chunks[i] for i in sorted(top))

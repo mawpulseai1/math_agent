@@ -10,7 +10,7 @@ from config import Config
 from export import write_run
 from lean_sandbox import LeanSandbox
 from llm import LLM
-from prover import ProofRunner, make_skeleton
+from prover import ProofRunner, make_skeleton, whole_file_repair
 from pytool import PyRunner
 from runtime import ensure_runtime
 from util import extract_block, strip_imports
@@ -75,6 +75,7 @@ JSON keys:
    6-10 diverse queries covering the exact statement, generalizations, special cases, named theorems,
    and terminology synonyms. targets are chosen from: "papers", "qa", "web", "oeis", "mine"
    ("mine" = the user's own paper library).""",
+            reasoning_effort="low",
         )
         d.setdefault("restatement", problem)
         d.setdefault("type", "prove")
@@ -172,6 +173,7 @@ EXCERPTS:
 
 Extract ONLY what helps solve the problem: exact theorem/lemma statements, key techniques,
 and how they could apply. Quote precisely and note hypotheses. If nothing useful, reply NONE.""",
+                    reasoning_effort="low",
                 )
             except Exception as e:
                 out = f"NONE ({e})"
@@ -212,6 +214,35 @@ and how they could apply. Quote precisely and note hypotheses. If nothing useful
         return insights
 
     # ------------------------------------------------------------ 4
+    def _verify_solution_sympy(self, d: dict, sol: str) -> str:
+        """Ask the LLM to write a short SymPy sanity check for algebraic/numeric steps in the draft."""
+        try:
+            code = extract_block(
+                self.llm.chat(
+                    MATH,
+                    f"""PROBLEM: {d.get('restatement')}
+PROPOSED SOLUTION:
+{sol[:5000]}
+
+Write a tiny self-contained Python 3 script (sympy/fractions/math only) that checks the key algebraic identities,
+bounds, edge cases, or computed values asserted in the solution above.
+Print `CHECK_OK` if every check passes, or print `CHECK_FAIL: <details>` if any claim fails.
+If the proof is purely non-computational (e.g., abstract topology/set theory), just print `CHECK_OK`.
+Reply with one ```python block.""",
+                    temperature=0.1,
+                    reasoning_effort="low",
+                ),
+                ("python", "py", ""),
+            )
+            ok, out, err = self.py.run(code, timeout=30)
+            if not ok:
+                return f"SymPy verification script errored: {(err or out)[-600:]}"
+            if "CHECK_FAIL" in out:
+                return out.strip()[-800:]
+        except Exception:
+            pass
+        return ""
+
     def solve_informal(self, d: dict, insights: list[dict], experiments: dict) -> str:
         ctx = (
             "\n\n".join(
@@ -220,34 +251,76 @@ and how they could apply. Quote precisely and note hypotheses. If nothing useful
             )
             or "(no sources found)"
         )
-        self.emit("solve", "Drafting solution using research and numerical evidence...")
-        sol = self.llm.chat(
-            MATH,
-            f"""PROBLEM ANALYSIS:\n{json.dumps(d, indent=1, ensure_ascii=False)}
+        n_cand = max(1, self.cfg.solve_candidates)
+        angles = [
+            ("direct / algebraic / constructive", 0.2),
+            ("extremal / invariant / contradiction or alternative lemma", 0.45),
+            ("research-guided synthesis using the strongest cited results", 0.65),
+        ]
+        self.emit("solve", f"Drafting {n_cand} candidate solution(s) with high reasoning...")
+
+        def draft(idx: int) -> str:
+            angle, temp = angles[idx % len(angles)]
+            return self.llm.chat(
+                MATH,
+                f"""PROBLEM ANALYSIS:\n{json.dumps(d, indent=1, ensure_ascii=False)}
 
 NUMERICAL EVIDENCE (Python tests):\n{json.dumps(experiments, indent=1, ensure_ascii=False)}
 
 RESEARCH NOTES:\n{ctx}
 
+Approach focus: {angle}.
 Solve the problem. First state the strategy, citing the results you use as [n].
 Then give a complete, rigorous, step-by-step solution. State the final answer clearly.
 If numerical evidence contradicts the claim, say so. Mark any step you are not sure of with (UNSURE).""",
-            temperature=0.3,
-        )
+                temperature=temp,
+                reasoning_effort=self.cfg.reasoning_effort,
+            )
+
+        if n_cand == 1:
+            sol = draft(0)
+        else:
+            with ThreadPoolExecutor(min(n_cand, 3)) as ex:
+                cands = list(ex.map(draft, range(n_cand)))
+            listing = "\n\n".join(f"=== CANDIDATE {i} ===\n{c[:4500]}" for i, c in enumerate(cands))
+            pick = self.llm.json(
+                MATH,
+                f"PROBLEM: {d.get('restatement')}\n\nCANDIDATE SOLUTIONS:\n{listing}\n\n"
+                'Pick the most mathematically rigorous, complete, gap-free candidate. '
+                'JSON: {"best": 0, "reason": "..."}',
+                reasoning_effort=self.cfg.reasoning_effort,
+            )
+            best_idx = pick.get("best", 0)
+            if not isinstance(best_idx, int) or not (0 <= best_idx < len(cands)):
+                best_idx = 0
+            self.emit("solve", f"Selected candidate {best_idx}: {pick.get('reason', '')}")
+            sol = cands[best_idx]
+
         for _ in range(self.cfg.informal_revisions):
+            sym_err = self._verify_solution_sympy(d, sol)
+            if sym_err:
+                self.emit("solve", f"SymPy check flagged: {sym_err[:200]}")
             crit = self.llm.json(
                 MATH,
                 f"PROBLEM: {d.get('restatement')}\n\nSOLUTION:\n{sol}\n\n"
-                'Act as a skeptical referee. Check every step, edge cases, and misuse of theorems. '
+                + (f"SYMPY VERIFICATION NOTE:\n{sym_err}\n\n" if sym_err else "")
+                + 'Act as a skeptical referee. Check every step, edge cases, and misuse of theorems. '
                 'JSON: {"valid": bool, "issues": ["..."]}',
+                reasoning_effort=self.cfg.reasoning_effort,
             )
             self.emit("solve", f"Referee: {crit}")
-            if crit.get("valid") or not crit.get("issues"):
+            issues = list(crit.get("issues") or [])
+            if sym_err and "CHECK_FAIL" in sym_err:
+                issues.append(sym_err)
+            if crit.get("valid") and not issues:
+                break
+            if not issues:
                 break
             sol = self.llm.chat(
                 MATH,
                 f"PROBLEM: {d.get('restatement')}\nRESEARCH:\n{ctx}\n\nSOLUTION:\n{sol}\n\n"
-                f"REFEREE ISSUES:\n{crit['issues']}\n\nRewrite the complete corrected solution.",
+                f"REFEREE ISSUES:\n{issues}\n\nRewrite the complete corrected solution.",
+                reasoning_effort=self.cfg.reasoning_effort,
             )
         return sol
 
@@ -278,6 +351,8 @@ Rules:
 - Be FAITHFUL: no extra hypotheses, no weakening.
 - Output only one ```lean block.{feedback}""",
                     model=self.cfg.prover_model,
+                    reasoning_effort=self.cfg.reasoning_effort,
+                    use_prover=True,
                 ),
                 ("lean", "lean4"),
             )
@@ -287,13 +362,20 @@ Rules:
                 if "sandbox unavailable" in res.output:
                     self.emit("lean", res.output)
                     return ""
-                feedback = f"\n\nPrevious attempt:\n{code}\nLean errors:\n{res.output[:2500]}\nFix them."
+                unknown = re.findall(r"unknown (?:identifier|constant) '([^']+)'", res.output)
+                hints = premise.search_names(unknown) if unknown else []
+                feedback = (
+                    f"\n\nPrevious attempt:\n{code}\nLean errors:\n{res.output[:2500]}\n"
+                    + ("Possibly relevant Mathlib names:\n" + "\n".join(hints) + "\n" if hints else "")
+                    + "Fix them."
+                )
                 continue
             back = self.llm.json(
                 MATH,
                 f"ORIGINAL: {d.get('restatement')}\n\nLEAN STATEMENT:\n{code}\n\n"
                 'Translate the Lean statement back into plain math and compare it with the original. '
                 'JSON: {"faithful": bool, "explanation": "..."}',
+                reasoning_effort=self.cfg.reasoning_effort,
             )
             self.emit("lean", f"Fidelity check: {back}")
             if back.get("faithful"):
@@ -304,6 +386,25 @@ Rules:
     # ------------------------------------------------------------ 6/7
     def prove(self, r: Report, d: dict):
         body = strip_imports(r.statement)
+
+        # Fast compiler-guided whole-proof repair loop first
+        self.emit("prove", "proof search mode: whole-file compiler repair")
+        wf_code, wf_res = whole_file_repair(
+            self.cfg,
+            self.llm,
+            r.statement,
+            r.informal,
+            self.lean.check,
+            self.emit,
+            premise.search_names,
+        )
+        if wf_res and wf_res.complete:
+            r.lean_code = wf_code
+            r.lean_verified = True
+            r.prover_stats = {"mode": "whole_file_repair", "holes_solved": 1, "holes_total": 1}
+            r.status = "VERIFIED by Lean 4 kernel"
+            return
+
         runner = ProofRunner(self.cfg, self.llm, self.lean.check, premise.for_goal, self.emit)
         skel = make_skeleton(
             self.cfg,

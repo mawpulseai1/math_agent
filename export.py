@@ -80,6 +80,7 @@ def latex_body(llm, markdown: str, keys: dict[int, str]) -> str:
         "- Omit the Lean block and the sources list.\n"
         "- Output only LaTeX, no commentary.\n\nMARKDOWN:\n" + md,
         temperature=0.1,
+        reasoning_effort="low",
     )
     body = extract_block(txt, ("latex", "tex", ""))
     body = re.sub(
